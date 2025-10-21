@@ -14,7 +14,7 @@ It also produces:
 Optionally, it can also generate images via:
 - Local Stable Diffusion WebUI (Automatic1111) API
 - OpenAI Images API (DALL·E / gpt-image models)
- - Google Gemini (image_generation tool via Generative Language API)
+ - Google Imagen 3 (via Google Generative Language API)
  - Replicate (e.g., ideogram-ai/ideogram-v3-turbo)
 
 References baked-in follow Amazon SEO best practices from Amazon Seller resources and reputable blogs (see bottom of this README for citations).
@@ -38,11 +38,11 @@ python3 generator.py "your niche here" --images --provider a1111 --sd-url http:/
 export OPENAI_API_KEY=sk-...
 python3 generator.py "your niche here" --images --provider openai --openai-model gpt-image-1 --openai-size 1024x1024
 
-# text + SEO + images (Gemini)
-# Requires env var GEMINI_API_KEY
+# text + SEO + images (Google Imagen)
+# Requires env var GEMINI_API_KEY (Google AI Studio key)
 export GEMINI_API_KEY=AIza...  # or set in .env
 python3 generator.py "your niche here" --images --provider gemini \
-  --gemini-model gemini-1.5-flash \
+  --gemini-model imagen-3.0 \
   --gemini-aspect 1:1
 
 # text + SEO + images (Replicate + Ideogram)
@@ -82,7 +82,7 @@ Outputs will be written to `output/` as an Excel file and CSV.
 To generate images, ensure you have either:
 - Automatic1111: WebUI running with `--api` and set `--provider a1111` (default) with `--sd-url`
 - OpenAI: Set `OPENAI_API_KEY` and use `--provider openai` with optional `--openai-model` and `--openai-size` flags
- - Gemini: Set `GEMINI_API_KEY` and use `--provider gemini` with optional `--gemini-model` and `--gemini-aspect` flags
+ - Gemini/Imagen: Set `GEMINI_API_KEY` and use `--provider gemini` with optional `--gemini-model` (e.g., `imagen-3.0`) and `--gemini-aspect` flags
  - Replicate: Set `REPLICATE_API_TOKEN` (or use `--replicate-token`) and `--provider replicate`. Default model is `ideogram-ai/ideogram-v3-turbo`.
 
 Images are written to `output/<slug>/img_<index>.png` and the path is included in the Excel/CSV.

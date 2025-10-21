@@ -456,20 +456,108 @@ def generate_images_openai_streaming(concepts: List[Concept], niche: str, model:
 
 
 def _resolve_gemini_model(name: str) -> str:
-    """Map friendly/legacy names to supported Gemini API models for image generation."""
+    """Map friendly/legacy names to supported Google image generation model.
+    For image generation, prefer Imagen 3 models via Generative Language API.
+    """
     if not name:
-        return "gemini-1.5-flash"
+        return "imagen-3.0"
     n = name.strip().lower()
-    # Map imagen aliases to 1.5-flash which supports image_generation tool via public API
-    if n.startswith("imagen") or n in {"imagegeneration", "image-generation", "image_gen"}:
-        return "gemini-1.5-flash"
-    return name
+    # If a gemini text model was supplied, prefer an Imagen model for images.
+    if n.startswith("gemini"):
+        return "imagen-3.0"
+    # Accept imagen aliases
+    if n in {"imagen", "imagen-3", "imagen-3.0", "imagen-3.0-fast", "imagen-3.0-light"} or n.startswith("imagen"):
+        return name
+    # Fallback to imagen
+    return "imagen-3.0"
+
+
+def _extract_inline_b64_from_gemini_response_obj(resp) -> str | None:
+    """Attempt to extract base64 image from various SDK response shapes."""
+    try:
+        # SDK objects: resp.candidates[0].content.parts[0].inline_data.data
+        candidates = getattr(resp, 'candidates', None)
+        if candidates:
+            cand0 = candidates[0]
+            content = getattr(cand0, 'content', None) or getattr(cand0, 'content', {})
+            parts = getattr(content, 'parts', None) or getattr(content, 'parts', [])
+            if parts:
+                p0 = parts[0]
+                inline = getattr(p0, 'inline_data', None) or {}
+                data = getattr(inline, 'data', None)
+                if data:
+                    return data
+        # Dict-like
+        if isinstance(resp, dict):
+            candidates = resp.get('candidates') or []
+            if candidates:
+                parts = ((candidates[0] or {}).get('content') or {}).get('parts') or []
+                if parts and isinstance(parts, list):
+                    inline = parts[0].get('inlineData') or {}
+                    data = inline.get('data')
+                    if data:
+                        return data
+    except Exception:
+        pass
+    return None
+
+
+def _generate_image_gemini_single(prompt: str, out_path: str, model: str, api_key: str) -> str:
+    """Try SDK first, then REST fallback. Returns out_path on success or raises."""
+    model = _resolve_gemini_model(model)
+
+    # Try SDK if available
+    try:
+        import google.generativeai as genai  # type: ignore
+        genai.configure(api_key=api_key)
+        # Tools specification differs across SDK versions; try permissive dict first
+        try:
+            gm = genai.GenerativeModel(model, tools=[{"image_generation": {}}])
+        except TypeError:
+            # Older versions expect model_name kwarg
+            gm = genai.GenerativeModel(model_name=model, tools=[{"image_generation": {}}])
+        # Request PNG inline
+        resp = gm.generate_content(prompt, generation_config={"response_mime_type": "image/png"})
+        b64 = _extract_inline_b64_from_gemini_response_obj(resp)
+        if b64:
+            _ensure_parent(out_path)
+            with open(out_path, 'wb') as f:
+                f.write(base64.b64decode(b64))
+            return out_path
+    except Exception as sdk_err:
+        # Continue to REST fallback, but keep context if needed
+        last_sdk_err = sdk_err  # noqa: F841
+
+    # REST fallback
+    try:
+        base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "tools": [{"image_generation": {}}],
+            "generationConfig": {"responseMimeType": "image/png"}
+        }
+        r = requests.post(base_url, json=payload, timeout=120)
+        if not r.ok:
+            # Surface server message for troubleshooting
+            try:
+                msg = r.text
+            except Exception:
+                msg = str(r.status_code)
+            raise RuntimeError(f"Gemini HTTP {r.status_code}: {msg}")
+        data = r.json()
+        b64 = _extract_inline_b64_from_gemini_response_obj(data)
+        if not b64:
+            raise RuntimeError("Gemini response missing inline image data")
+        _ensure_parent(out_path)
+        with open(out_path, 'wb') as f:
+            f.write(base64.b64decode(b64))
+        return out_path
+    except Exception as rest_err:
+        raise rest_err
 
 
 def generate_images_gemini(concepts: List[Concept], niche: str, model: str = "gemini-1.5-flash", aspect: str = "1:1") -> None:
-    """Generate images with Google Generative Language API using generateContent + image_generation tool.
-    Requires GEMINI_API_KEY.
-    """
+    """Generate images via Gemini using SDK first with REST fallback. Requires GEMINI_API_KEY."""
     api_key = _os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set in environment")
@@ -478,37 +566,13 @@ def generate_images_gemini(concepts: List[Concept], niche: str, model: str = "ge
     img_dir = os.path.join('output', slug)
     os.makedirs(img_dir, exist_ok=True)
 
-    model = _resolve_gemini_model(model)
-    base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-
     for idx, c in enumerate(concepts, start=1):
         try:
-            payload = {
-                "contents": [{"role": "user", "parts": [{"text": c.image_prompt}]}],
-                "tools": [{"image_generation": {}}],
-                # Optional: you can include aspect hints in the text prompt; the API prefers square by default
-                "generationConfig": {"responseMimeType": "image/png"}
-            }
-            r = requests.post(base_url, json=payload, timeout=120)
-            r.raise_for_status()
-            data = r.json()
-            # Expected: candidates[0].content.parts[0].inlineData.data (base64)
-            candidates = data.get("candidates") or []
-            if not candidates:
-                raise RuntimeError("Gemini returned no candidates")
-            parts = ((candidates[0] or {}).get("content") or {}).get("parts") or []
-            if not parts or not isinstance(parts, list):
-                raise RuntimeError("Gemini candidate missing content parts")
-            inline = parts[0].get("inlineData") or {}
-            b64 = inline.get("data")
-            if not b64:
-                raise RuntimeError("Gemini candidate missing image data")
-            img_bytes = base64.b64decode(b64)
             out_path = os.path.join(img_dir, f"img_{idx:02d}.png")
-            with open(out_path, 'wb') as f:
-                f.write(img_bytes)
-            c.image_path = out_path
+            p = _generate_image_gemini_single(c.image_prompt, out_path, model, api_key)
+            c.image_path = p
         except Exception as e:
+            # Include brief message for 400s
             print(f"[warn] gemini image generation failed for #{idx}: {e}")
     
 
@@ -582,25 +646,9 @@ def generate_images_failover(concepts: List[Concept], niche: str, args, provider
                     break
                 elif provider == 'gemini' and GEMINI_KEY:
                     try:
-                        gm = _resolve_gemini_model(getattr(args, 'gemini_model', 'gemini-1.5-flash'))
-                        base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{gm}:generateContent?key={GEMINI_KEY}"
-                        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "tools": [{"image_generation": {}}], "generationConfig": {"responseMimeType": "image/png"}}
-                        r = requests.post(base_url, json=payload, timeout=120)
-                        r.raise_for_status()
-                        data = r.json()
-                        candidates = data.get("candidates") or []
-                        if not candidates:
-                            raise RuntimeError("Gemini returned no candidates")
-                        parts = ((candidates[0] or {}).get("content") or {}).get("parts") or []
-                        if not parts:
-                            raise RuntimeError("Gemini candidate missing content parts")
-                        b64 = (parts[0].get("inlineData") or {}).get("data")
-                        if not b64:
-                            raise RuntimeError("Gemini candidate missing image data")
-                        img_bytes = base64.b64decode(b64)
-                        with open(out_path, 'wb') as f:
-                            f.write(img_bytes)
-                        c.image_path = out_path
+                        gm = getattr(args, 'gemini_model', 'gemini-1.5-flash')
+                        p = _generate_image_gemini_single(prompt, out_path, gm, GEMINI_KEY)
+                        c.image_path = p
                         success = True
                         break
                     except Exception as e:
@@ -732,7 +780,7 @@ def main():
     parser.add_argument("--replicate-aspect", type=str, default="1:1", help="Replicate aspect ratio, e.g., 1:1, 3:4, 16:9 (provider=replicate)")
     parser.add_argument("--replicate-token", type=str, default="", help="Replicate API token override; else use REPLICATE_API_TOKEN env")
     # Gemini options
-    parser.add_argument("--gemini-model", type=str, default="gemini-1.5-flash", help="Gemini image model id (provider=gemini). Imagen aliases like 'imagen-3.0' will auto-map to a supported model.")
+    parser.add_argument("--gemini-model", type=str, default="imagen-3.0", help="Google image model id (provider=gemini). Defaults to 'imagen-3.0'.")
     parser.add_argument("--gemini-aspect", type=str, default="1:1", help="Gemini aspect ratio (provider=gemini), e.g., 1:1, 3:4, 16:9")
     # Multi-key rotation and provider failover
     parser.add_argument("--provider-order", type=str, default=None, help="Comma-separated provider order to try, e.g., 'a1111,openai,replicate'")
@@ -1250,8 +1298,8 @@ def _resolve_gemini_model(name: str) -> str:
     return name
 
 
-def generate_images_gemini(concepts: List[Concept], niche: str, model: str = "gemini-1.5-flash", aspect: str = "1:1") -> None:
-    """Generate images with Google Generative Language API using generateContent + image_generation tool.
+def generate_images_gemini(concepts: List[Concept], niche: str, model: str = "imagen-3.0", aspect: str = "1:1") -> None:
+    """Generate images with Google Generative Language API using Imagen 3 via generateContent.
     Requires GEMINI_API_KEY.
     """
     api_key = _os.environ.get("GEMINI_API_KEY")
@@ -1269,9 +1317,8 @@ def generate_images_gemini(concepts: List[Concept], niche: str, model: str = "ge
         try:
             payload = {
                 "contents": [{"role": "user", "parts": [{"text": c.image_prompt}]}],
-                "tools": [{"image_generation": {}}],
-                # Optional: you can include aspect hints in the text prompt; the API prefers square by default
-                "generationConfig": {"responseMimeType": "image/png"}
+                # Hint: embed aspect ratio in the text prompt; Imagen uses square by default
+                "generationConfig": {"response_mime_type": "image/png"}
             }
             r = requests.post(base_url, json=payload, timeout=120)
             r.raise_for_status()
@@ -1366,9 +1413,9 @@ def generate_images_failover(concepts: List[Concept], niche: str, args, provider
                     break
                 elif provider == 'gemini' and GEMINI_KEY:
                     try:
-                        gm = _resolve_gemini_model(getattr(args, 'gemini_model', 'gemini-1.5-flash'))
+                        gm = _resolve_gemini_model(getattr(args, 'gemini_model', 'imagen-3.0'))
                         base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{gm}:generateContent?key={GEMINI_KEY}"
-                        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "tools": [{"image_generation": {}}], "generationConfig": {"responseMimeType": "image/png"}}
+                        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"response_mime_type": "image/png"}}
                         r = requests.post(base_url, json=payload, timeout=120)
                         r.raise_for_status()
                         data = r.json()
