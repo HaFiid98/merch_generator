@@ -16,6 +16,7 @@ Optionally, it can also generate images via:
 - OpenAI Images API (DALL·E / gpt-image models)
  - Google Imagen 3 (via Google Generative Language API)
  - Replicate (e.g., ideogram-ai/ideogram-v3-turbo)
+ - Stability AI (Stable Diffusion XL via Stability API)
 
 References baked-in follow Amazon SEO best practices from Amazon Seller resources and reputable blogs (see bottom of this README for citations).
 
@@ -44,6 +45,13 @@ export GEMINI_API_KEY=AIza...  # or set in .env
 python3 generator.py "your niche here" --images --provider gemini \
   --gemini-model imagen-3.0 \
   --gemini-aspect 1:1
+
+# text + SEO + images (Stability AI)
+# Requires env var STABLE_DIFFUSION_API_KEY
+export STABLE_DIFFUSION_API_KEY=sk-...
+python3 generator.py "your niche here" --images --provider stability \
+  --stability-engine stable-diffusion-xl-1024-v1-0 \
+  --steps 30 --cfg 7 --width 1024 --height 1024
 
 # text + SEO + images (Replicate + Ideogram)
 # Requires env var REPLICATE_API_TOKEN or pass --replicate-token
@@ -83,6 +91,7 @@ To generate images, ensure you have either:
 - Automatic1111: WebUI running with `--api` and set `--provider a1111` (default) with `--sd-url`
 - OpenAI: Set `OPENAI_API_KEY` and use `--provider openai` with optional `--openai-model` and `--openai-size` flags
  - Gemini/Imagen: Set `GEMINI_API_KEY` and use `--provider gemini` with optional `--gemini-model` (e.g., `imagen-3.0`) and `--gemini-aspect` flags
+ - Stability AI: Set `STABLE_DIFFUSION_API_KEY` and use `--provider stability` with `--stability-engine` and generation flags
  - Replicate: Set `REPLICATE_API_TOKEN` (or use `--replicate-token`) and `--provider replicate`. Default model is `ideogram-ai/ideogram-v3-turbo`.
 
 Images are written to `output/<slug>/img_<index>.png` and the path is included in the Excel/CSV.
